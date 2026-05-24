@@ -55,3 +55,21 @@ The hierarchical model with command-level random effects provided the best fit a
 The analysis suggests that arrest probability is mainly associated with the suspected offence and with key features of the stop, especially whether the suspect was searched.
 
 The results also suggest some residual variation across boroughs and clearer residual differences across police command codes. These findings should be interpreted as associations within an observational dataset, not as causal effects.
+
+## Data
+
+The dataset used in this project is included in the `data/` folder.
+
+It contains NYPD Stop, Question and Frisk data for 2025. More details on the dataset source, variables used, and preprocessing steps are available in [`data/README.md`](data/README.md).
+
+## Report
+
+The final project report is available [here](report/S2882823_BDA.pdf).
+
+The report contains the full model specification, prior choices, model comparison results, diagnostics, and interpretation of the main findings.
+
+## Notes
+
+This project was developed as part of a Bayesian Data Analysis assignment.
+
+The focus was on specifying, fitting, comparing, and interpreting Bayesian logistic regression models for an observational dataset. The results should therefore be read as evidence of associations, not causal effects.
