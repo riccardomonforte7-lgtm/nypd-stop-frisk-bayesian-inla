@@ -1,0 +1,1029 @@
+
+```{r} 
+#EDA and preprocessing
+#upload relevant packages
+#install.packages(c("readxl", "dplyr", "janitor")) #install packages if needed
+library(readxl)
+library(dplyr)
+library(janitor)
+library(INLA)
+
+#EDA and data pre-processing
+#Let's start by defining the variables to keep
+vars_keep <- c(
+  "STOP_ID",
+  "SUSPECT_ARRESTED_FLAG",
+  "SUSPECT_REPORTED_AGE",
+  "SUSPECT_SEX",
+  "SUSPECT_RACE_DESCRIPTION",
+  "SUSPECT_HEIGHT",
+  "SUSPECT_WEIGHT",
+  "STOP_WAS_INITIATED",
+  "SUSPECTED_CRIME_DESCRIPTION",
+  "OBSERVED_DURATION_MINUTES",
+  "STOP_DURATION_MINUTES",
+  "WEAPON_FOUND_FLAG",
+  "FRISKED_FLAG",
+  "SEARCHED_FLAG",
+  "STOP_FRISK_DATE",
+  "STOP_FRISK_TIME",
+  "STOP_LOCATION_BORO_NAME",
+  "ISSUING_OFFICER_COMMAND_CODE"
+)
+
+#We also keep the variable STOP_ID to check for duplicates
+
+#load the data
+sqf_raw <- read_excel("sqf-2025.xlsx")
+
+#select the relevant variables
+sqf <- sqf_raw[, vars_keep]
+head(sqf)
+
+#Check the data
+dim(sqf)
+names(sqf)
+glimpse(sqf)
+summary(sqf)
+
+#Store the name of numeric and categorical variables
+id_vars <- c("STOP_ID")
+
+categorical_vars <- c(
+  "SUSPECT_ARRESTED_FLAG",
+  "SUSPECT_SEX",
+  "SUSPECT_RACE_DESCRIPTION",
+  "STOP_WAS_INITIATED",
+  "SUSPECTED_CRIME_DESCRIPTION",
+  "WEAPON_FOUND_FLAG",
+  "FRISKED_FLAG",
+  "SEARCHED_FLAG",
+  "STOP_LOCATION_BORO_NAME",
+  "ISSUING_OFFICER_COMMAND_CODE"
+)
+
+numeric_vars <- c(
+  "SUSPECT_REPORTED_AGE",
+  "SUSPECT_HEIGHT",
+  "SUSPECT_WEIGHT",
+  "OBSERVED_DURATION_MINUTES",
+  "STOP_DURATION_MINUTES"
+)
+
+date_time_vars <- c(
+  "STOP_FRISK_DATE",
+  "STOP_FRISK_TIME"
+)
+
+#Check for duplicates
+sum(duplicated(sqf$STOP_ID))
+
+#No duplicated rows, we can proceed with the analysis
+
+sqf$STOP_ID <- NULL #remove the STOP_ID variable as it is not useful for the analysis
+
+head(sqf)
+
+for (v in categorical_vars) {
+  cat("Variable:", v, "\n")
+  
+  counts <- table(sqf[[v]])
+  perc <- round(prop.table(counts) * 100, 2)
+  
+  freq_table <- data.frame(
+    Level = names(counts),
+    Count = as.vector(counts),
+    Percentage = as.vector(perc)
+  )
+  
+  print(freq_table)
+}
+
+#Missing values are encoded as (null). At this stage, we remove all rows containing at least one (null) entry in the selected variables.
+
+#convert (null) to NA
+sqf[sqf == "(null)"] <- NA
+
+#Let's check how many rows we lose by removing all rows with at least one NA
+
+cat("Number of rows lost by removing rows with at least one NA:", nrow(sqf) - nrow(na.omit(sqf)))
+
+#Let's proceed by deleting NAs
+
+sqf_clean <- na.omit(sqf)
+
+#Lets tranform into factors the categorical variables with small cardinality
+factor_vars_small <- c(
+  "SUSPECT_SEX",
+  "STOP_WAS_INITIATED",
+  "STOP_LOCATION_BORO_NAME",
+  "SUSPECT_ARRESTED_FLAG",
+  "WEAPON_FOUND_FLAG",
+  "FRISKED_FLAG",
+  "SEARCHED_FLAG",
+  "SUSPECT_RACE_DESCRIPTION")
+
+sqf_clean[factor_vars_small] <- lapply(sqf_clean[factor_vars_small], factor)
+
+#Let's encode ISSUING_OFFICER_COMMAND_CODE as a factor as well, even if it has high cardinality,
+#because it represents a police command code,  and it will be used later
+#as a grouping factor in a hierarchical model.
+
+sqf_clean$ISSUING_OFFICER_COMMAND_CODE <- factor(sqf_clean$ISSUING_OFFICER_COMMAND_CODE)
+
+#Lets check the proportion of each level within categorical variables with high cardinality only
+factor_vars_high <- "SUSPECTED_CRIME_DESCRIPTION"
+factor_vars_high
+for (v in factor_vars_high) {
+ 
+  cat("Variable:", v, "\n")
+  
+  counts <- table(sqf_clean[[v]])
+  perc <- round(prop.table(counts) * 100, 2)
+  
+  freq_table <- data.frame(
+    Level = names(counts),
+    Count = as.vector(counts),
+    Percentage = as.vector(perc)
+  )
+  
+  print(freq_table)
+}
+
+#Recode rare crime categories into OTHER if their frequency is below 0.1%
+crime_counts <- table(sqf_clean$SUSPECTED_CRIME_DESCRIPTION)
+crime_perc <- prop.table(crime_counts) * 100
+
+rare_crimes <- names(crime_perc[crime_perc < 0.1])
+rare_crimes
+
+#group rare crimes into "OTHER" category
+sqf_clean$SUSPECTED_CRIME_DESCRIPTION[sqf_clean$SUSPECTED_CRIME_DESCRIPTION %in% rare_crimes] <- "OTHER"
+
+sqf_clean$SUSPECTED_CRIME_DESCRIPTION <- factor(sqf_clean$SUSPECTED_CRIME_DESCRIPTION)
+dim(sqf_clean)
+
+#Now let's check the distribution of numeric features to spot potential outliers
+
+#Check that numeric_vars actually contain numeric variables
+sapply(sqf_clean[numeric_vars], class)
+#Convert to numeric
+
+sqf_clean$SUSPECT_HEIGHT <- as.numeric(sqf_clean$SUSPECT_HEIGHT)
+sqf_clean$SUSPECT_WEIGHT <- as.numeric(sqf_clean$SUSPECT_WEIGHT)
+
+#Check number of na in SUSPECT_HEIGHT
+sum(is.na(as.numeric(sqf_clean$SUSPECT_HEIGHT)))
+sum(is.na(as.numeric(sqf_clean$SUSPECT_WEIGHT)))
+
+summary(sqf_clean[numeric_vars])
+
+#Let's plot a boxplot for numeric variables to check for outliers
+par(mfrow = c(2, 3))
+
+for (v in numeric_vars) {
+  boxplot(sqf_clean[[v]], main = v, horizontal = TRUE)
+}
+
+#plot histograms
+par(mfrow = c(2, 3))
+for (v in numeric_vars) {
+  hist(sqf_clean[[v]], main = v, xlab = v)
+}
+
+#Correlation matrix for numeric variables
+cor_matrix <- cor(sqf_clean[numeric_vars], use = "complete.obs")
+print(cor_matrix)
+
+
+#Check distribution of log(time variables)
+sqf_clean$log_OBSERVED_DURATION <- log1p(sqf_clean$OBSERVED_DURATION_MINUTES)
+sqf_clean$log_STOP_DURATION <- log1p(sqf_clean$STOP_DURATION_MINUTES)
+
+par(mfrow = c(1, 2))
+hist(sqf_clean$log_OBSERVED_DURATION, main = "log(1 + OBSERVED_DURATION_MINUTES)", xlab = "log_OBSERVED_DURATION")
+hist(sqf_clean$log_STOP_DURATION, main = "log(1 + STOP_DURATION_MINUTES)", xlab = "log_STOP_DURATION")
+```
+
+#---------FIT MODEL 1 in inla------------#
+```{r} 
+#Keep only variables used in Model 1
+model1_data <- sqf_clean[, c(
+  "SUSPECT_ARRESTED_FLAG",
+  "SUSPECT_REPORTED_AGE",
+  "log_STOP_DURATION",
+  "SUSPECT_SEX",
+  "SUSPECT_RACE_DESCRIPTION",
+  "STOP_WAS_INITIATED",
+  "SUSPECTED_CRIME_DESCRIPTION",
+  "FRISKED_FLAG",
+  "SEARCHED_FLAG",
+  "WEAPON_FOUND_FLAG",
+  "STOP_LOCATION_BORO_NAME"
+)]
+
+#define a binary response for the binomial model
+model1_data$SUSPECT_ARRESTED_FLAG <- ifelse(
+  model1_data$SUSPECT_ARRESTED_FLAG == "Y", 1, 0
+)
+
+#Centre numeric covariates used in the model
+model1_data$SUSPECT_REPORTED_AGE<- model1_data$SUSPECT_REPORTED_AGE -
+  mean(model1_data$SUSPECT_REPORTED_AGE)
+
+model1_data$log_STOP_DURATION<- model1_data$log_STOP_DURATION -
+  mean(model1_data$log_STOP_DURATION)
+
+#choose reference categories 
+model1_data$SUSPECT_SEX <- relevel(model1_data$SUSPECT_SEX, ref = "MALE")
+model1_data$SUSPECT_RACE_DESCRIPTION <- relevel(model1_data$SUSPECT_RACE_DESCRIPTION, ref = "BLACK")
+model1_data$STOP_WAS_INITIATED <- relevel(model1_data$STOP_WAS_INITIATED, ref = "Based on Self Initiated")
+model1_data$SUSPECTED_CRIME_DESCRIPTION <- relevel(model1_data$SUSPECTED_CRIME_DESCRIPTION, ref = "CPW")
+model1_data$FRISKED_FLAG <- relevel(model1_data$FRISKED_FLAG, ref = "N")
+model1_data$SEARCHED_FLAG <- relevel(model1_data$SEARCHED_FLAG, ref = "N")
+model1_data$WEAPON_FOUND_FLAG <- relevel(model1_data$WEAPON_FOUND_FLAG, ref = "N")
+model1_data$STOP_LOCATION_BORO_NAME <- relevel(model1_data$STOP_LOCATION_BORO_NAME, ref = "BRONX")
+
+#Priors
+prior.fixed <- list(
+  mean.intercept = 0,
+  prec.intercept = 0.01,   # variace = 100
+  mean = 0,
+  prec = 0.04              # variance = 25
+)
+
+#Fit Model 1
+m1 <- inla(
+  SUSPECT_ARRESTED_FLAG ~
+    SUSPECT_REPORTED_AGE +
+    log_STOP_DURATION +
+    SUSPECT_SEX +
+    SUSPECT_RACE_DESCRIPTION +
+    STOP_WAS_INITIATED +
+    SUSPECTED_CRIME_DESCRIPTION +
+    FRISKED_FLAG +
+    SEARCHED_FLAG +
+    WEAPON_FOUND_FLAG +
+    STOP_LOCATION_BORO_NAME,
+  family = "binomial",
+  data = model1_data,
+  control.fixed = prior.fixed,
+  control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE)
+)
+
+#output
+summary(m1)
+
+#Fixed effects summary
+m1$summary.fixed
+
+#DIC and WAIC
+m1$dic$dic
+m1$waic$waic
+
+#Marginal log-likelihood
+m1$mlik
+
+#Fixed effects summary
+m1$summary.fixed
+
+#DIC and WAIC
+m1$dic$dic
+m1$waic$waic
+
+#Marginal log-likelihood
+m1$mlik
+
+#NLSCPO
+nlscpo.m1 <- -sum(log(m1$cpo$cpo), na.rm = TRUE)
+nlscpo.m1
+
+coef_table <- data.frame(
+  Coefficient = rownames(m1$summary.fixed),
+  Mean = m1$summary.fixed$mean,
+  Lower95 = m1$summary.fixed$`0.025quant`,
+  Upper95 = m1$summary.fixed$`0.975quant`,
+  AbsMean = abs(m1$summary.fixed$mean),
+  row.names = NULL
+)
+
+coef_table <- coef_table[order(coef_table$AbsMean, decreasing = TRUE), ]
+
+
+print(coef_table[1:6, c("Coefficient", "Mean", "Lower95", "Upper95")], row.names = FALSE)
+```
+#-----Model2-----#
+```{r} 
+#we start from sqf_clean and build a new dataset for model 2
+model2_data <- sqf_clean[, c(
+  "SUSPECT_ARRESTED_FLAG",
+  "SUSPECT_REPORTED_AGE",
+  "SUSPECT_HEIGHT",
+  "SUSPECT_WEIGHT",
+  "log_OBSERVED_DURATION",
+  "log_STOP_DURATION",
+  "SUSPECT_SEX",
+  "SUSPECT_RACE_DESCRIPTION",
+  "STOP_WAS_INITIATED",
+  "SUSPECTED_CRIME_DESCRIPTION",
+  "FRISKED_FLAG",
+  "SEARCHED_FLAG",
+  "WEAPON_FOUND_FLAG",
+  "STOP_LOCATION_BORO_NAME",
+  "STOP_FRISK_DATE",
+  "STOP_FRISK_TIME"
+)]
+
+#Encode the response variable
+
+model2_data$SUSPECT_ARRESTED_FLAG <- ifelse(
+  model2_data$SUSPECT_ARRESTED_FLAG == "Y", 1, 0
+)
+
+#Center continuous variables, as in model 1
+model2_data$SUSPECT_REPORTED_AGE <- model2_data$SUSPECT_REPORTED_AGE -
+  mean(model2_data$SUSPECT_REPORTED_AGE)
+
+model2_data$SUSPECT_HEIGHT <- model2_data$SUSPECT_HEIGHT -
+  mean(model2_data$SUSPECT_HEIGHT)
+
+model2_data$SUSPECT_WEIGHT <- model2_data$SUSPECT_WEIGHT -
+  mean(model2_data$SUSPECT_WEIGHT)
+
+model2_data$log_OBSERVED_DURATION <- model2_data$log_OBSERVED_DURATION -
+  mean(model2_data$log_OBSERVED_DURATION)
+
+model2_data$log_STOP_DURATION <- model2_data$log_STOP_DURATION -
+  mean(model2_data$log_STOP_DURATION)
+
+#set reference categories, as in model 1
+model2_data$SUSPECT_SEX <- relevel(model2_data$SUSPECT_SEX, ref = "MALE")
+model2_data$SUSPECT_RACE_DESCRIPTION <- relevel(model2_data$SUSPECT_RACE_DESCRIPTION, ref = "BLACK")
+model2_data$STOP_WAS_INITIATED <- relevel(model2_data$STOP_WAS_INITIATED, ref = "Based on Self Initiated")
+model2_data$SUSPECTED_CRIME_DESCRIPTION <- relevel(model2_data$SUSPECTED_CRIME_DESCRIPTION, ref = "CPW")
+model2_data$FRISKED_FLAG <- relevel(model2_data$FRISKED_FLAG, ref = "N")
+model2_data$SEARCHED_FLAG <- relevel(model2_data$SEARCHED_FLAG, ref = "N")
+model2_data$WEAPON_FOUND_FLAG <- relevel(model2_data$WEAPON_FOUND_FLAG, ref = "N")
+model2_data$STOP_LOCATION_BORO_NAME <- relevel(model2_data$STOP_LOCATION_BORO_NAME, ref = "BRONX")
+
+#---Temporal variables--#
+#Calendar date effect:
+#convert STOP_FRISK_DATE to Date and then create an ordered index
+model2_data$STOP_FRISK_DATE <- as.Date(model2_data$STOP_FRISK_DATE)
+
+#ordered unique dates
+date_levels <- sort(unique(model2_data$STOP_FRISK_DATE))
+
+#integer index for RW1
+model2_data$date_index <- match(model2_data$STOP_FRISK_DATE, date_levels)
+
+#check
+length(date_levels)
+
+#Time-of-day effect:
+#convert HH:MM:SS to seconds from midnight, then we discretize
+time_chr <- as.character(model2_data$STOP_FRISK_TIME)
+time_posix <- strptime(time_chr, format = "%H:%M:%S")
+
+seconds_from_midnight <- time_posix$hour * 3600 +
+  time_posix$min * 60 +
+  time_posix$sec
+
+#choose a discretization for the cyclic effect
+#30-minute bins -> 48 points over the 24-hour cycle
+model2_data$time_bin <- floor(seconds_from_midnight / (30 * 60)) + 1
+
+#safety check: should go from 1 to 48
+range(model2_data$time_bin)
+
+
+#Borough index for random effect
+
+#INLA random effects work comfortably with integer indices
+model2_data$boro_id <- as.integer(model2_data$STOP_LOCATION_BORO_NAME)
+
+
+#Same priors for fixed effects as in model 1
+prior.fixed <- list(
+  mean.intercept = 0,
+  prec.intercept = 0.01,   # variance = 100
+  mean = 0,
+  prec = 0.04              # variance = 25
+)
+
+#PC priors for latent random effects:
+#P(sd > 1) = 0.01
+pc_prec <- list(
+  prec = list(
+    prior = "pc.prec",
+    param = c(1, 0.01)
+  )
+)
+
+
+#Fit Model 2
+m2 <- inla(
+  SUSPECT_ARRESTED_FLAG ~
+    SUSPECT_REPORTED_AGE +
+    SUSPECT_HEIGHT +
+    SUSPECT_WEIGHT +
+    log_OBSERVED_DURATION +
+    log_STOP_DURATION +
+    SUSPECT_SEX +
+    SUSPECT_RACE_DESCRIPTION +
+    STOP_WAS_INITIATED +
+    SUSPECTED_CRIME_DESCRIPTION +
+    FRISKED_FLAG +
+    SEARCHED_FLAG +
+    WEAPON_FOUND_FLAG +
+    f(date_index, model = "rw1",
+      hyper = pc_prec) +
+    f(time_bin, model = "rw1", cyclic = TRUE,
+      hyper = pc_prec) +
+    f(boro_id, model = "iid",
+      hyper = pc_prec),
+  family = "binomial",
+  data = model2_data,
+  control.fixed = prior.fixed,
+  control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(compute = TRUE)
+)
+
+
+#Output
+
+summary(m2)
+
+#Fixed effects
+m2$summary.fixed
+
+#Random effects / latent components
+m2$summary.hyperpar
+
+#Model comparison criteria
+m2$dic$dic
+m2$waic$waic
+m2$mlik
+
+#CPO-based summary
+nlscpo.m2 <- -sum(log(m2$cpo$cpo), na.rm = TRUE)
+nlscpo.m2
+
+#Fixed effects summary for Model 2: largest coefficients in absolute value
+coef_table_m2 <- data.frame(
+  Coefficient = rownames(m2$summary.fixed),
+  Mean = m2$summary.fixed$mean,
+  Lower95 = m2$summary.fixed$`0.025quant`,
+  Upper95 = m2$summary.fixed$`0.975quant`,
+  AbsMean = abs(m2$summary.fixed$mean),
+  row.names = NULL
+)
+
+coef_table_m2 <- coef_table_m2[order(coef_table_m2$AbsMean, decreasing = TRUE), ]
+
+print(coef_table_m2[1:6, c("Coefficient", "Mean", "Lower95", "Upper95")], row.names = FALSE)
+
+#----Model 2 specific plots----#
+#Extract posterior summary of borough random effects
+boro_re <- m2$summary.random$boro_id
+
+#Recover borough labels using the ID returned by INLA
+boro_labels <- levels(model2_data$STOP_LOCATION_BORO_NAME)[boro_re$ID]
+
+# Build plotting data frame on log-odds scale
+boro_plot <- data.frame(
+  borough = boro_labels,
+  mean = boro_re$mean,
+  low = boro_re$`0.025quant`,
+  high = boro_re$`0.975quant`
+)
+
+#Extract time-of-day random effect
+time_re <- m2$summary.random$time_bin
+
+# Midpoints of 30-minute bins in hours
+time_mid_hours <- seq(0.25, 23.75, by = 0.5)
+
+
+png("model2_borough_time_effects_logodds.png", width = 1600, height = 800, res = 150)
+
+par(mfrow = c(1, 2), mar = c(8, 5, 4, 2) + 0.1)
+
+#Plot borough random effects on log-odds scale
+plot(
+  x = 1:nrow(boro_plot),
+  y = boro_plot$mean,
+  ylim = range(c(boro_plot$low, boro_plot$high)),
+  xlim = c(0.7, nrow(boro_plot) + 0.3),
+  pch = 16,
+  xaxt = "n",
+  xlab = "",
+  ylab = "Borough effect (log-odds scale)",
+  main = "Borough random effects"
+)
+
+arrows(
+  x0 = 1:nrow(boro_plot),
+  y0 = boro_plot$low,
+  x1 = 1:nrow(boro_plot),
+  y1 = boro_plot$high,
+  angle = 90,
+  code = 3,
+  length = 0.05
+)
+
+abline(h = 0, col = "red", lty = 2)
+
+axis(
+  1,
+  at = 1:nrow(boro_plot),
+  labels = boro_plot$borough,
+  las = 2,
+  cex.axis = 0.9
+)
+
+#plot cyclic RW1 effect for time of day on log-odds scale
+plot(
+  x = time_mid_hours,
+  y = time_re$mean,
+  type = "l",
+  lwd = 2,
+  ylim = range(c(time_re$`0.025quant`, time_re$`0.975quant`)),
+  xaxt = "n",
+  xlab = "Time of day",
+  ylab = "Time-of-day effect (log-odds scale)",
+  main = "Estimated cyclic RW1 effect for time of day"
+)
+
+lines(time_mid_hours, time_re$`0.025quant`, lty = 2)
+lines(time_mid_hours, time_re$`0.975quant`, lty = 2)
+
+abline(h = 0, col = "red", lty = 2)
+
+axis(
+  1,
+  at = seq(0, 22, by = 2),
+  labels = sprintf("%02d:00", seq(0, 22, by = 2)),
+  las = 2,
+  cex.axis = 0.8
+)
+
+dev.off()
+```
+```{r} 
+#Model 3: hierarchical extension
+
+#Build dataset for model 3
+model3_data <- sqf_clean[, c(
+  "SUSPECT_ARRESTED_FLAG",
+  "SUSPECT_REPORTED_AGE",
+  "SUSPECT_HEIGHT",
+  "SUSPECT_WEIGHT",
+  "log_OBSERVED_DURATION",
+  "log_STOP_DURATION",
+  "SUSPECT_SEX",
+  "SUSPECT_RACE_DESCRIPTION",
+  "STOP_WAS_INITIATED",
+  "SUSPECTED_CRIME_DESCRIPTION",
+  "FRISKED_FLAG",
+  "SEARCHED_FLAG",
+  "WEAPON_FOUND_FLAG",
+  "STOP_LOCATION_BORO_NAME",
+  "STOP_FRISK_DATE",
+  "STOP_FRISK_TIME",
+  "ISSUING_OFFICER_COMMAND_CODE"
+)]
+
+#Encode response variable
+model3_data$SUSPECT_ARRESTED_FLAG <- ifelse(
+  model3_data$SUSPECT_ARRESTED_FLAG == "Y", 1, 0
+)
+
+
+#Center continuous covariates
+
+model3_data$SUSPECT_REPORTED_AGE <- model3_data$SUSPECT_REPORTED_AGE -
+  mean(model3_data$SUSPECT_REPORTED_AGE)
+
+model3_data$SUSPECT_HEIGHT <- model3_data$SUSPECT_HEIGHT -
+  mean(model3_data$SUSPECT_HEIGHT)
+
+model3_data$SUSPECT_WEIGHT <- model3_data$SUSPECT_WEIGHT -
+  mean(model3_data$SUSPECT_WEIGHT)
+
+model3_data$log_OBSERVED_DURATION <- model3_data$log_OBSERVED_DURATION -
+  mean(model3_data$log_OBSERVED_DURATION)
+
+model3_data$log_STOP_DURATION <- model3_data$log_STOP_DURATION -
+  mean(model3_data$log_STOP_DURATION)
+
+
+#Reference categories
+
+model3_data$SUSPECT_SEX <- relevel(model3_data$SUSPECT_SEX, ref = "MALE")
+model3_data$SUSPECT_RACE_DESCRIPTION <- relevel(model3_data$SUSPECT_RACE_DESCRIPTION, ref = "BLACK")
+model3_data$STOP_WAS_INITIATED <- relevel(model3_data$STOP_WAS_INITIATED, ref = "Based on Self Initiated")
+model3_data$SUSPECTED_CRIME_DESCRIPTION <- relevel(model3_data$SUSPECTED_CRIME_DESCRIPTION, ref = "CPW")
+model3_data$FRISKED_FLAG <- relevel(model3_data$FRISKED_FLAG, ref = "N")
+model3_data$SEARCHED_FLAG <- relevel(model3_data$SEARCHED_FLAG, ref = "N")
+model3_data$WEAPON_FOUND_FLAG <- relevel(model3_data$WEAPON_FOUND_FLAG, ref = "N")
+model3_data$STOP_LOCATION_BORO_NAME <- relevel(model3_data$STOP_LOCATION_BORO_NAME, ref = "BRONX")
+
+#------------------------
+#Temporal variables
+
+#Calendar date -> ordered index for RW1
+model3_data$STOP_FRISK_DATE <- as.Date(model3_data$STOP_FRISK_DATE)
+date_levels <- sort(unique(model3_data$STOP_FRISK_DATE))
+model3_data$date_index <- match(model3_data$STOP_FRISK_DATE, date_levels)
+
+#Time of day -> seconds from midnight -> 30-minute bins, as in model 2
+time_chr <- as.character(model3_data$STOP_FRISK_TIME)
+time_posix <- strptime(time_chr, format = "%H:%M:%S")
+
+seconds_from_midnight <- time_posix$hour * 3600 +
+  time_posix$min * 60 +
+  time_posix$sec
+
+model3_data$time_bin <- floor(seconds_from_midnight / (30 * 60)) + 1
+
+#Grouping indices for random effects
+
+
+#Borough random effect
+model3_data$boro_id <- as.integer(model3_data$STOP_LOCATION_BORO_NAME)
+
+#Command-level hierarchical random effect
+model3_data$command_id <- as.integer(model3_data$ISSUING_OFFICER_COMMAND_CODE)
+
+
+#Priors
+
+
+#Same priors for fixed effects as in previous models
+prior.fixed <- list(
+  mean.intercept = 0,
+  prec.intercept = 0.01,   # variance = 100
+  mean = 0,
+  prec = 0.04              # variance = 25
+)
+
+#PC prior for all latent random effects:
+
+pc_prec <- list(
+  prec = list(
+    prior = "pc.prec",
+    param = c(1, 0.01)
+  )
+)
+
+
+#Fit Model 3
+
+m3 <- inla(
+  SUSPECT_ARRESTED_FLAG ~
+    SUSPECT_REPORTED_AGE +
+    SUSPECT_HEIGHT +
+    SUSPECT_WEIGHT +
+    log_OBSERVED_DURATION +
+    log_STOP_DURATION +
+    SUSPECT_SEX +
+    SUSPECT_RACE_DESCRIPTION +
+    STOP_WAS_INITIATED +
+    SUSPECTED_CRIME_DESCRIPTION +
+    FRISKED_FLAG +
+    SEARCHED_FLAG +
+    WEAPON_FOUND_FLAG +
+    f(date_index, model = "rw1",
+      hyper = pc_prec) +
+    f(time_bin, model = "rw1", cyclic = TRUE,
+      hyper = pc_prec) +
+    f(boro_id, model = "iid",
+      hyper = pc_prec) +
+    f(command_id, model = "iid",
+      hyper = pc_prec),
+  family = "binomial",
+  data = model3_data,
+  control.fixed = prior.fixed,
+  control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(compute = TRUE)
+)
+
+
+#Output
+
+summary(m3)
+
+#Fixed effects
+m3$summary.fixed
+
+#Hyperparameters
+m3$summary.hyperpar
+
+#Fit criteria
+m3$dic$dic
+m3$waic$waic
+m3$mlik
+
+#NLSCPO
+nlscpo.m3 <- -sum(log(m3$cpo$cpo), na.rm = TRUE)
+nlscpo.m3
+
+
+#Fixed component
+
+coef_table_m3 <- data.frame(
+  Coefficient = rownames(m3$summary.fixed),
+  Mean = m3$summary.fixed$mean,
+  Lower95 = m3$summary.fixed$`0.025quant`,
+  Upper95 = m3$summary.fixed$`0.975quant`,
+  AbsMean = abs(m3$summary.fixed$mean),
+  row.names = NULL
+)
+
+coef_table_m3 <- coef_table_m3[order(coef_table_m3$AbsMean, decreasing = TRUE), ]
+
+print(coef_table_m3[1:15, c("Coefficient", "Mean", "Lower95", "Upper95")], row.names = FALSE)
+
+m3$summary.hyperpar
+#Extract posterior summary of command random effects
+cmd_re <- m3$summary.random$command_id
+
+#Recover command labels using the ID returned by INLA
+cmd_labels <- levels(model3_data$ISSUING_OFFICER_COMMAND_CODE)[cmd_re$ID]
+
+#Build plotting data frame
+cmd_plot <- data.frame(
+  command = cmd_labels,
+  mean = cmd_re$mean,
+  low = cmd_re$`0.025quant`,
+  high = cmd_re$`0.975quant`
+)
+
+#Order commands by posterior mean
+cmd_plot <- cmd_plot[order(cmd_plot$mean), ]
+
+#----- Posterior summary of SD for command random effect -----#
+# we Select a subset of command effects:
+# 10 most negative, 10 closest to zero, 10 most positive
+
+n_extreme <- 10
+n_middle  <- 10
+
+#already ordered by mean
+cmd_plot_ord <- cmd_plot[order(cmd_plot$mean), ]
+
+#most negative
+cmd_low <- head(cmd_plot_ord, n_extreme)
+
+#most positive
+cmd_high <- tail(cmd_plot_ord, n_extreme)
+
+#closest to zero
+cmd_middle <- cmd_plot[order(abs(cmd_plot$mean)), ]
+cmd_middle <- head(cmd_middle, n_middle)
+
+#combine and remove duplicates if any
+cmd_plot_sub <- rbind(cmd_low, cmd_middle, cmd_high)
+cmd_plot_sub <- cmd_plot_sub[!duplicated(cmd_plot_sub$command), ]
+
+#order again by posterior mean
+cmd_plot_sub <- cmd_plot_sub[order(cmd_plot_sub$mean), ]
+rownames(cmd_plot_sub) <- NULL
+
+# Posterior summary of the SD for the command-level random effect
+
+#marginal posterior for the precision of command_id
+cmd_prec_marg <- m3$marginals.hyperpar[["Precision for command_id"]]
+
+#transform precision into sd
+cmd_sd_marg <- inla.tmarginal(function(x) 1 / sqrt(x), cmd_prec_marg)
+
+#posterior mean of the SD
+cmd_sd_mean <- inla.emarginal(function(x) x, cmd_sd_marg)
+
+#95% credible interval for the SD
+cmd_sd_ci <- inla.qmarginal(c(0.025, 0.975), cmd_sd_marg)
+
+#text to display in the plot
+sd_text <- paste0(
+  "SD(command effect)\n",
+  "mean = ", round(cmd_sd_mean, 3), "\n",
+  "95% CrI = [", round(cmd_sd_ci[1], 3), ", ", round(cmd_sd_ci[2], 3), "]"
+)
+png("model3_selected_command_effects.png", width = 1200, height = 900, res = 150)
+
+par(mar = c(4, 10, 4, 2) + 0.1)
+
+plot(
+  x = cmd_plot_sub$mean,
+  y = 1:nrow(cmd_plot_sub),
+  xlim = range(c(cmd_plot_sub$low, cmd_plot_sub$high)),
+  pch = 16,
+  yaxt = "n",
+  ylab = "",
+  xlab = "Command effect (log-odds scale)",
+  main = "Selected command-level random effects"
+)
+
+arrows(
+  x0 = cmd_plot_sub$low,
+  y0 = 1:nrow(cmd_plot_sub),
+  x1 = cmd_plot_sub$high,
+  y1 = 1:nrow(cmd_plot_sub),
+  angle = 90,
+  code = 3,
+  length = 0.03
+)
+
+abline(v = 0, col = "red", lty = 2)
+
+axis(
+  2,
+  at = 1:nrow(cmd_plot_sub),
+  labels = cmd_plot_sub$command,
+  las = 2,
+  cex.axis = 0.8
+)
+
+usr <- par("usr")
+
+text(
+  x = usr[2] - 0.03 * diff(usr[1:2]),
+  y = usr[3] + 0.08 * diff(usr[3:4]),
+  labels = sd_text,
+  adj = c(1, 0),
+  cex = 0.9
+)
+
+dev.off()
+
+
+```
+
+
+#Model comparison
+
+```{r} 
+
+#Evaluation metrics for all 3 models
+cat("Model 1 - DIC:", m1$dic$dic, "\n")
+cat("Model 2 - DIC:", m2$dic$dic, "\n")
+cat("Model 3 - DIC:", m3$dic$dic, "\n\n")
+
+cat("Model 1 - WAIC:", m1$waic$waic, "\n")
+cat("Model 2 - WAIC:", m2$waic$waic, "\n")
+cat("Model 3 - WAIC:", m3$waic$waic, "\n\n")
+
+cat("Model 1 - NLSCPO:", nlscpo.m1, "\n")
+cat("Model 2 - NLSCPO:", nlscpo.m2, "\n")
+cat("Model 3 - NLSCPO:", nlscpo.m3, "\n")
+
+
+
+# Calibration plots
+
+# function to build calibration table
+make_calibration_table <- function(observed, fitted, n_groups = 10) {
+  
+  calib_data <- data.frame(
+    observed = observed,
+    fitted = fitted
+  )
+  
+  #quantile-based groups
+  breaks_cal <- quantile(
+    calib_data$fitted,
+    probs = seq(0, 1, length.out = n_groups + 1),
+    na.rm = TRUE
+  )
+  
+  calib_data$bin <- cut(
+    calib_data$fitted,
+    breaks = breaks_cal,
+    include.lowest = TRUE,
+    duplicates = "drop"
+  )
+  
+  #average observed and fitted within each bin
+  calib_summary <- aggregate(
+    cbind(observed, fitted) ~ bin,
+    data = calib_data,
+    FUN = mean
+  )
+  
+  #number of obs in each bin
+  bin_counts <- aggregate(
+    observed ~ bin,
+    data = calib_data,
+    FUN = length
+  )
+  names(bin_counts)[2] <- "n"
+  
+  calib_summary <- merge(calib_summary, bin_counts, by = "bin")
+  
+  #approximate 95% interval for observed proportion
+  calib_summary$se_obs <- sqrt(
+    calib_summary$observed * (1 - calib_summary$observed) / calib_summary$n
+  )
+  
+  calib_summary$low <- pmax(0, calib_summary$observed - 1.96 * calib_summary$se_obs)
+  calib_summary$high <- pmin(1, calib_summary$observed + 1.96 * calib_summary$se_obs)
+  
+  calib_summary
+}
+
+#observed outcomes
+obs_m1 <- model1_data$SUSPECT_ARRESTED_FLAG
+obs_m2 <- model2_data$SUSPECT_ARRESTED_FLAG
+obs_m3 <- model3_data$SUSPECT_ARRESTED_FLAG
+
+#fitted probabilities
+fitted_m1 <- m1$summary.fitted.values$mean
+fitted_m2 <- m2$summary.fitted.values$mean
+fitted_m3 <- m3$summary.fitted.values$mean
+
+#calibration tables
+calib_m1 <- make_calibration_table(obs_m1, fitted_m1, n_groups = 10)
+calib_m2 <- make_calibration_table(obs_m2, fitted_m2, n_groups = 10)
+calib_m3 <- make_calibration_table(obs_m3, fitted_m3, n_groups = 10)
+
+#inspect tables
+calib_m1
+calib_m2
+calib_m3
+
+#Calibration plots
+
+png("calibration_plots_m1_m2_m3.png", width = 1800, height = 650, res = 150)
+
+par(mfrow = c(1, 3), mar = c(5, 5, 4, 2) + 0.1)
+
+# Model 1
+plot(
+  calib_m1$fitted,
+  calib_m1$observed,
+  ylim = c(0, 1),
+  xlim = c(0, 1),
+  pch = 16,
+  xlab = "Mean predicted probability",
+  ylab = "Observed arrest proportion",
+  main = "Model 1: calibration plot"
+)
+arrows(
+  x0 = calib_m1$fitted,
+  y0 = calib_m1$low,
+  x1 = calib_m1$fitted,
+  y1 = calib_m1$high,
+  angle = 90,
+  code = 3,
+  length = 0.05
+)
+abline(0, 1, col = "red", lty = 2)
+
+#Model 2
+plot(
+  calib_m2$fitted,
+  calib_m2$observed,
+  ylim = c(0, 1),
+  xlim = c(0, 1),
+  pch = 16,
+  xlab = "Mean predicted probability",
+  ylab = "Observed arrest proportion",
+  main = "Model 2: calibration plot"
+)
+arrows(
+  x0 = calib_m2$fitted,
+  y0 = calib_m2$low,
+  x1 = calib_m2$fitted,
+  y1 = calib_m2$high,
+  angle = 90,
+  code = 3,
+  length = 0.05
+)
+abline(0, 1, col = "red", lty = 2)
+
+#Model 3
+plot(
+  calib_m3$fitted,
+  calib_m3$observed,
+  ylim = c(0, 1),
+  xlim = c(0, 1),
+  pch = 16,
+  xlab = "Mean predicted probability",
+  ylab = "Observed arrest proportion",
+  main = "Model 3: calibration plot"
+)
+arrows(
+  x0 = calib_m3$fitted,
+  y0 = calib_m3$low,
+  x1 = calib_m3$fitted,
+  y1 = calib_m3$high,
+  angle = 90,
+  code = 3,
+  length = 0.05
+)
+abline(0, 1, col = "red", lty = 2)
+
+dev.off()
+```
